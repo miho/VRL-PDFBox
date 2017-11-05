@@ -24,7 +24,9 @@ package eu.mihosoft.pdfbox.vrlplugin;
 
 import eu.mihosoft.vrl.annotation.ComponentInfo;
 import eu.mihosoft.vrl.annotation.ParamInfo;
+import eu.mihosoft.vrl.system.VMessage;
 import eu.mihosoft.vrl.visual.ImageUtils;
+import eu.mihosoft.vrl.visual.MessageType;
 import org.apache.pdfbox.contentstream.PDFStreamEngine;
 import org.apache.pdfbox.contentstream.operator.DrawObject;
 import org.apache.pdfbox.contentstream.operator.Operator;
@@ -63,11 +65,13 @@ public class ShrinkPDF implements Serializable {
     // necessary for session serialization
     private static final long serialVersionUID = 1L;
 
+    private transient int imgCounter = 1;
+
     // -- custom code --
 
 
-    public void shrinkPDF(@ParamInfo(name = "PDF Input file", style = "load-dialog", options = "endings=[]") File inF,
-                          @ParamInfo(name = "PDF Output file", style = "save-dialog") File outF,
+    public void shrinkPDF(@ParamInfo(name = "PDF Input file", style = "load-dialog", options = "endings=[\".pdf\"]; description=\"*.pdf - Files\"") File inF,
+                          @ParamInfo(name = "PDF Output file", style = "save-dialog", options = "endings=[\".pdf\"]; description=\"*.pdf - Files\"") File outF,
                           @ParamInfo(name = "Image Quality", style = "slider", options = "min=0;max=100;value=90") int quality,
                           @ParamInfo(name = "DPI", options = "min=0;value=300") int dpi
     ) throws IOException {
@@ -99,6 +103,9 @@ public class ShrinkPDF implements Serializable {
         System.out.println("********************************************************************************");
         System.out.println("Starting with shrinking " + input.getAbsolutePath());
 
+        VMessage.getMsgBox().addMessageAsLog("Processing PDF", "Starting with shrinking " + input.getAbsolutePath() + "\n",MessageType.INFO);
+
+
         final PDFParser parser = new PDFParser(new RandomAccessFile(input, "r"));
         parser.parse();
 
@@ -107,21 +114,34 @@ public class ShrinkPDF implements Serializable {
 
             ImageDPI dpiProcessor = new ImageDPI();
 
-            // scan resources for images to shrink
+            // compute image dpi
             for (PDPage p : pages) {
                 dpiProcessor.processPage(p);
+            }
+
+            imgCounter = 1;
+
+            // scan resources for images to shrink
+            for (PDPage p : pages) {
                 scanAndShrinkImages(p.getResources(), doc, jPEGCompQual, dpiProcessor, dpi);
             }
+
+            System.out.println("Saving...");
+            VMessage.getMsgBox().addMessageAsLog("Processing PDF", "Saving...\n",MessageType.INFO);
 
             doc.save(output);
         }
 
         System.out.println("Done with shrinking " + input.getAbsolutePath());
         System.out.println("********************************************************************************");
+
+        VMessage.getMsgBox().addMessageAsLog("Processing PDF", "Done with shrinking " + input.getAbsolutePath() + "\n",MessageType.INFO);
     }
 
     private void scanAndShrinkImages(PDResources resources, final PDDocument doc, float jPEGCompQual, ImageDPI dpiProcessor, int dpi)
             throws IOException {
+
+
 
         for (COSName k : resources.getXObjectNames()) {
             final PDXObject xObj = resources.getXObject(k);
@@ -137,7 +157,10 @@ public class ShrinkPDF implements Serializable {
             }
 
             PDImageXObject img = (PDImageXObject) xObj;
-            System.out.println("-> converting img: " + k.getName());
+            System.out.println("-> converting img: " + k.getName() + " : (" + imgCounter + "/"+dpiProcessor.getNumerOfImages()+")");
+
+
+            VMessage.getMsgBox().addMessageAsLog("Processing PDF", "-> converting img: " + k.getName() + " : (" + imgCounter + "/"+dpiProcessor.getNumerOfImages() + ")\n", MessageType.INFO, 30);
 
             int currentDPI = dpiProcessor.getDPIof(k.getName());
 
@@ -155,6 +178,8 @@ public class ShrinkPDF implements Serializable {
             PDImageXObject compressedImg = JPEGFactory.createFromImage(doc, scaledImg, jPEGCompQual);
 
             resources.put(k, compressedImg);
+
+            imgCounter++;
         }
     }
 }
@@ -175,6 +200,10 @@ class ImageDPI extends PDFStreamEngine {
 
     public Integer getDPIof(String img) {
         return imageDPI.get(img);
+    }
+
+    public int getNumerOfImages() {
+        return imageDPI.size();
     }
 
     /**
