@@ -29,6 +29,12 @@ package edu.gcsc.vrl.tutorial;
 
 import eu.mihosoft.vrl.annotation.ComponentInfo;
 import eu.mihosoft.vrl.annotation.ParamInfo;
+import eu.mihosoft.vrl.visual.ImageUtils;
+import org.apache.pdfbox.contentstream.PDFStreamEngine;
+import org.apache.pdfbox.contentstream.operator.DrawObject;
+import org.apache.pdfbox.contentstream.operator.Operator;
+import org.apache.pdfbox.contentstream.operator.state.*;
+import org.apache.pdfbox.cos.COSBase;
 import org.apache.pdfbox.cos.COSName;
 import org.apache.pdfbox.io.RandomAccessFile;
 import org.apache.pdfbox.pdfparser.PDFParser;
@@ -40,21 +46,25 @@ import org.apache.pdfbox.pdmodel.graphics.PDXObject;
 import org.apache.pdfbox.pdmodel.graphics.form.PDFormXObject;
 import org.apache.pdfbox.pdmodel.graphics.image.JPEGFactory;
 import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
+import org.apache.pdfbox.util.Matrix;
 
-import javax.imageio.IIOImage;
-import javax.imageio.ImageIO;
-import javax.imageio.ImageWriteParam;
-import javax.imageio.ImageWriter;
-import java.io.*;
-import java.util.Iterator;
+import java.awt.image.BufferedImage;
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.io.Serializable;
+import java.nio.Buffer;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 /**
  * A tutorial component.
  *
  * @author Michael Hoffer <info@michaelhoffer.de>
  */
-@ComponentInfo(name="ShrinkPDF", category="PDFBox")
-public class ShrinkPDF implements Serializable{
+@ComponentInfo(name = "ShrinkPDF", category = "PDFBox")
+public class ShrinkPDF implements Serializable {
 
     // necessary for session serialization
     private static final long serialVersionUID = 1L;
@@ -62,68 +72,174 @@ public class ShrinkPDF implements Serializable{
     // -- custom code --
 
 
-    public void shrinkPDF(@ParamInfo(name="PDF Input file", style="load-dialog", options="endings=[]") File inF,
-                          @ParamInfo(name="PDF Output file", style="save-dialog") File outF,
-                          @ParamInfo(name="Image Quality", style="slider", options="min=0;max=100;value=90") int quality
-                          ) throws IOException {
-        shrinkPDF(inF,outF,1.f/quality);
+    public void shrinkPDF(@ParamInfo(name = "PDF Input file", style = "load-dialog", options = "endings=[]") File inF,
+                          @ParamInfo(name = "PDF Output file", style = "save-dialog") File outF,
+                          @ParamInfo(name = "Image Quality", style = "slider", options = "min=0;max=100;value=90") int quality,
+                          @ParamInfo(name = "DPI", options = "min=0;value=300") int dpi
+    ) throws IOException {
+        shrinkPDF(inF, outF, quality / 100f, dpi);
     }
 
     /**
      * Shrink a PDF
-     * @param input input file to shrink
+     *
+     * @param input        input file to shrink
+     * @param output       output file (shrinked pdf)
      * @param jPEGCompQual JPEG compression quality value. {@code 0} means lowest quality,
-     * {@code 1} means highest image quality.
-     * @return The compressed {@code PDDocument}
+     *                     {@code 1} means highest image quality.
+     * @param dpi          image dpi, e.g., 300
      * @throws FileNotFoundException
      * @throws IOException
      */
-    private void shrinkPDF(File input, File output, float jPEGCompQual)
+    private void shrinkPDF(File input, File output, float jPEGCompQual, int dpi)
             throws IOException {
 
-        if(jPEGCompQual < 0 || jPEGCompQual > 1) {
+        if (jPEGCompQual < 0 || jPEGCompQual > 1) {
             throw new RuntimeException("jPEGCompQual out of range. Valid range: [0, 1]!");
         }
 
-        final PDFParser parser = new PDFParser(new RandomAccessFile(input,"r"));
-        parser.parse();
-        final PDDocument doc = parser.getPDDocument();
-        PDPageTree pages = doc.getDocumentCatalog().getPages();
-
-        // scan resources for images to shrink
-        for(PDPage p : pages) {
-            scanAndShrinkImages(p.getResources(), doc, jPEGCompQual);
+        if (dpi < 0) {
+            throw new RuntimeException("dpi out of range. Valid range: [0, Integer.MAX_VALUE]!");
         }
 
-        doc.save(output);
+        System.out.println("********************************************************************************");
+        System.out.println("Starting with shrinking " + input.getAbsolutePath());
+
+        final PDFParser parser = new PDFParser(new RandomAccessFile(input, "r"));
+        parser.parse();
+
+        try(PDDocument doc = parser.getPDDocument()) {
+            PDPageTree pages = doc.getDocumentCatalog().getPages();
+
+            ImageDPI dpiProcessor = new ImageDPI();
+
+            // scan resources for images to shrink
+            for (PDPage p : pages) {
+                dpiProcessor.processPage(p);
+                scanAndShrinkImages(p.getResources(), doc, jPEGCompQual, dpiProcessor, dpi);
+            }
+
+            doc.save(output);
+        }
+
+        System.out.println("Done with shrinking " + input.getAbsolutePath());
+        System.out.println("********************************************************************************");
     }
 
-    private void scanAndShrinkImages(final PDResources resources, final PDDocument doc, float jPEGCompQual)
-            throws FileNotFoundException, IOException {
+    private void scanAndShrinkImages(PDResources resources, final PDDocument doc, float jPEGCompQual, ImageDPI dpiProcessor, int dpi)
+            throws IOException {
 
-
-        for(COSName k : resources.getXObjectNames()) {
+        for (COSName k : resources.getXObjectNames()) {
             final PDXObject xObj = resources.getXObject(k);
-            if(xObj instanceof PDFormXObject)
-                scanAndShrinkImages(((PDFormXObject) xObj).getResources(), doc, jPEGCompQual);
-            if(!(xObj instanceof PDImageXObject))
+
+            // if this is a form we dive into it
+            if (xObj instanceof PDFormXObject) {
+                scanAndShrinkImages(((PDFormXObject) xObj).getResources(), doc, jPEGCompQual, dpiProcessor, dpi);
+            }
+
+            // we are only interested in images. thus, we skip everything else
+            if (!(xObj instanceof PDImageXObject)) {
                 continue;
+            }
+
             PDImageXObject img = (PDImageXObject) xObj;
-            System.out.println(" -> converting img: " + k);
-            final Iterator<ImageWriter> jpgWriters =
-                    ImageIO.getImageWritersByFormatName("jpeg");
-            final ImageWriter jpgWriter = jpgWriters.next();
-            final ImageWriteParam iwp = jpgWriter.getDefaultWriteParam();
-            iwp.setCompressionMode(ImageWriteParam.MODE_EXPLICIT);
-            iwp.setCompressionQuality(jPEGCompQual);
-            ByteArrayOutputStream baos = new ByteArrayOutputStream();
-            jpgWriter.setOutput(ImageIO.createImageOutputStream(baos));
-            jpgWriter.write(null,
-                    new IIOImage(img.getImage(), null, null), iwp);
-            ByteArrayInputStream bais =
-                    new ByteArrayInputStream(baos.toByteArray());
-            PDImageXObject compressedImg = JPEGFactory.createFromStream(doc,bais);
+            System.out.println("-> converting img: " + k.getName());
+
+            int currentDPI = dpiProcessor.getDPIof(k.getName());
+
+            double dpiScale = dpi * 1.0 / currentDPI;
+
+            System.out.println("  -> dpi-scale: " + dpiScale);
+
+            int newW = (int) (img.getWidth()*dpiScale);
+            int newH = (int) (img.getHeight()*dpiScale);
+
+            System.out.println("  -> img-size@" + dpi + "dpi: " + newW + "x"+newH);
+
+            BufferedImage scaledImg = ImageUtils.convert(img.getImage(), BufferedImage.TYPE_INT_ARGB, newW, newH);
+
+            PDImageXObject compressedImg = JPEGFactory.createFromImage(doc, scaledImg, jPEGCompQual);
+
             resources.put(k, compressedImg);
+        }
+    }
+}
+
+class ImageDPI extends PDFStreamEngine {
+
+    private final Map<String, Integer> imageDPI = new HashMap<>();
+
+    public ImageDPI() {
+        // prepare PDFStreamEngine
+        addOperator(new Concatenate());
+        addOperator(new DrawObject());
+        addOperator(new SetGraphicsStateParameters());
+        addOperator(new Save());
+        addOperator(new Restore());
+        addOperator(new SetMatrix());
+    }
+
+    public Integer getDPIof(String img) {
+        return imageDPI.get(img);
+    }
+
+    /**
+     * This is used to handle an operation.
+     *
+     * @param operator The operation to perform.
+     * @param operands The list of arguments.
+     * @throws IOException If there is an error processing the operation.
+     */
+    @Override
+    protected void processOperator(Operator operator, List<COSBase> operands) throws IOException {
+        String operation = operator.getName();
+
+        if ("Do".equals(operation)) {
+            COSName objectName = (COSName) operands.get(0);
+            PDXObject xobject = getResources().getXObject(objectName);
+            if (xobject instanceof PDImageXObject) {
+                PDImageXObject image = (PDImageXObject) xobject;
+                int imageWidth = image.getWidth();
+                int imageHeight = image.getHeight();
+                //System.out.println("*******************************************************************");
+                //System.out.println("Found image [" + objectName.getName() + "]");
+
+                //System.out.println("Stack Size: " + getGraphicsStackSize());
+
+                Matrix ctmNew = getGraphicsState().getCurrentTransformationMatrix();
+                float imageXScale = ctmNew.getScalingFactorX();
+                float imageYScale = ctmNew.getScalingFactorY();
+
+                //System.out.println("Scaling factor = " + imageXScale + ", " + imageYScale);
+
+                // position in user space units. 1 unit = 1/72 inch at 72 dpi
+                //System.out.println("position in PDF = " + ctmNew.getTranslateX() + ", " + ctmNew.getTranslateY() + " in user space units");
+                // raw size in pixels
+                //System.out.println("raw image size  = " + imageWidth + ", " + imageHeight + " in pixels");
+                // displayed size in user space units
+                //System.out.println("displayed size  = " + imageXScale + ", " + imageYScale + " in user space units");
+                // displayed size in inches at 72 dpi rendering
+                imageXScale /= 72;
+                imageYScale /= 72;
+                //System.out.println("displayed size  = " + imageXScale + ", " + imageYScale + " in inches at 72 dpi rendering");
+                int dpi = (int)(imageWidth / imageXScale);
+                //System.out.println("DPI: " + dpi);
+
+                imageDPI.put(objectName.getName(), dpi);
+
+                // displayed size in millimeters at 72 dpi rendering
+                imageXScale *= 25.4;
+                imageYScale *= 25.4;
+                //System.out.println("displayed size  = " + imageXScale + ", " + imageYScale + " in millimeters at 72 dpi rendering");
+                //System.out.println();
+
+
+            } else if (xobject instanceof PDFormXObject) {
+                PDFormXObject form = (PDFormXObject) xobject;
+                showForm(form);
+            }
+        } else {
+            super.processOperator(operator, operands);
         }
     }
 }
